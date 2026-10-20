@@ -222,6 +222,9 @@ jobs:
           详见 [docs/RELEASING.md](https://github.com/colorcard/hmcl-region-fix/blob/main/docs/RELEASING.md)。
           EOF
 
+          sed "s/v<version>/v$VERSION/g" "$NOTES" > "$NOTES.tmp"
+          mv "$NOTES.tmp" "$NOTES"
+
           if gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
               -f tag_name="$TAG" --jq .body > "$RUNNER_TEMP/generated-notes.md" 2>/dev/null; then
             printf '\n' >> "$NOTES"
