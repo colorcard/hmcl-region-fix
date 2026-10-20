@@ -1,5 +1,7 @@
 # HMCL Region Fix
 
+[![CI](https://github.com/colorcard/hmcl-region-fix/actions/workflows/ci.yml/badge.svg)](https://github.com/colorcard/hmcl-region-fix/actions/workflows/ci.yml)
+
 Fix false-positive "Chinese Mainland" region detection in **affected HMCL versions** for users in **Taiwan, Hong Kong, Macau, and the Asia-Pacific region**.
 
 > **This is an unofficial community project, not affiliated with HMCL.**
@@ -85,6 +87,23 @@ build.bat
 
 产物：`build/HMCL-Region-Fix.jar`
 
+运行测试：
+
+```bash
+./tests/run.sh build/HMCL-Region-Fix.jar
+```
+
+### 发布与验证
+
+正式 release 只由 GitHub Actions 从 `main` 上的 `v*` 标签构建。发布流程会重新构建并校验 jar 与源码一致、运行 Agent 测试、生成 SHA-256 和 Sigstore 构建来源证明，在全部校验通过后才发布。手动上传的资产不属于受信任发布。
+
+```bash
+sha256sum -c SHA256SUMS
+gh attestation verify HMCL-Region-Fix.jar --repo colorcard/hmcl-region-fix
+```
+
+详见 [docs/RELEASING.md](docs/RELEASING.md)。
+
 ### 常见问题
 
 **Q: HMCL 还是显示限制？**
@@ -167,6 +186,23 @@ build.bat         # Windows
 ```
 
 Output: `build/HMCL-Region-Fix.jar`
+
+Run the tests:
+
+```bash
+./tests/run.sh build/HMCL-Region-Fix.jar
+```
+
+### Release integrity
+
+Official releases are built only by GitHub Actions from `v*` tags on `main`. The release workflow rebuilds from the tagged commit, verifies that the jar matches the sources, runs the agent tests, publishes SHA-256 checksums and Sigstore build provenance, and verifies every asset again before making the release public. Manually uploaded assets are not trusted releases.
+
+```bash
+sha256sum -c SHA256SUMS
+gh attestation verify HMCL-Region-Fix.jar --repo colorcard/hmcl-region-fix
+```
+
+See [docs/RELEASING.md](docs/RELEASING.md) for details.
 
 ### Disclaimer
 

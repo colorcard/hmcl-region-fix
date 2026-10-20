@@ -1,0 +1,88 @@
+# CI builds and verifies the project on all supported platforms.
+# CI artifacts are for inspection only and are never used by the release
+# workflow; releases are rebuilt from the tagged commit.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set reproducible build timestamp
+        shell: bash
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./build.sh
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: build.bat
+
+      - name: Verify jar and run agent tests
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          ./scripts/verify-jar.sh build/HMCL-Region-Fix.jar
+          ./tests/run.sh build/HMCL-Region-Fix.jar
+
+      - name: Smoke test (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: cmd
+        run: |
+          java -Djava.awt.headless=true -jar build\HMCL-Region-Fix.jar --scan
+
+      - name: Verify release packaging
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          ./scripts/package-release.sh 0.0.0 build/HMCL-Region-Fix.jar dist
+          ./scripts/verify-package.sh dist/HMCL-Region-Fix-v0.0.0.zip 0.0.0
+
+  # Stable check name for branch protection, even when the matrix changes.
+  ci-success:
+    name: CI success
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check build matrix result
+        run: |
+          if [ "${{ needs.build.result }}" != "success" ]; then
+            echo "::error::One or more build jobs failed (result: ${{ needs.build.result }})"
+            exit 1
+          fi

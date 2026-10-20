@@ -1,0 +1,326 @@
+# Trusted release pipeline.
+#
+# Invariants:
+#   - runs only in the canonical repository;
+#   - the tag commit must be reachable from main;
+#   - release.yml at the tag must match the reviewed copy on main;
+#   - assets are rebuilt from the validated commit (never from PR/CI artifacts);
+#   - checksums and Sigstore provenance are verified before and after publishing.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Validate release tag
+    if: github.repository == 'colorcard/hmcl-region-fix'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check tag, branch and workflow
+        id: check
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if ! printf '%s' "$TAG" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z][0-9A-Za-z.-]*)?$'; then
+            echo "::error::Tag '$TAG' is not a valid release version (expected vX.Y.Z)"
+            exit 1
+          fi
+
+          version=${TAG#v}
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          commit_sha=$(git rev-parse "$GITHUB_SHA^{commit}")
+          if ! git merge-base --is-ancestor "$commit_sha" refs/remotes/origin/main; then
+            echo "::error::Tag commit $commit_sha is not reachable from main"
+            exit 1
+          fi
+
+          # Only a reviewed release workflow may publish a release.
+          if ! git diff --quiet refs/remotes/origin/main -- .github/workflows/release.yml; then
+            echo "::error::release.yml at the tag differs from main; refusing to release"
+            git diff --stat refs/remotes/origin/main -- .github/workflows/release.yml || true
+            exit 1
+          fi
+
+  build:
+    name: Build and verify release assets
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set reproducible build timestamp
+        shell: bash
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Build
+        shell: bash
+        run: ./build.sh
+
+      - name: Verify jar and agent behavior
+        shell: bash
+        run: |
+          ./scripts/verify-jar.sh build/HMCL-Region-Fix.jar
+          ./tests/run.sh build/HMCL-Region-Fix.jar
+
+      - name: Package release assets
+        shell: bash
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          ./scripts/package-release.sh "$VERSION" build/HMCL-Region-Fix.jar dist
+          ./scripts/verify-package.sh "dist/HMCL-Region-Fix-v$VERSION.zip" "$VERSION"
+
+      - name: Upload verified assets for attestation and publishing
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  attest:
+    name: Attest release assets
+    needs: [guard, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download verified assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Verify checksums before attesting
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -c SHA256SUMS
+          sha256sum -c HMCL-Region-Fix.jar.sha256
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+  publish:
+    name: Publish GitHub release
+    needs: [guard, build, attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: write
+      actions: read
+      attestations: read
+    steps:
+      - name: Download verified assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Verify checksums and provenance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Re-check the tag immediately before publishing: a tag moved after
+          # the guard job must not be attached to these assets.
+          tag_ref_sha=$(git ls-remote --tags "https://github.com/$GITHUB_REPOSITORY.git" \
+            "refs/tags/$TAG" | awk 'NR == 1 { print $1 }')
+          tag_commit_sha=$(git ls-remote --tags "https://github.com/$GITHUB_REPOSITORY.git" \
+            "refs/tags/$TAG^{}" | awk 'NR == 1 { print $1 }')
+          if [ "$tag_ref_sha" != "$GITHUB_SHA" ] && [ "$tag_commit_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::Tag $TAG no longer points to $GITHUB_SHA (tag: ${tag_ref_sha:-missing}, commit: ${tag_commit_sha:-missing})"
+            exit 1
+          fi
+
+          cd dist
+
+          sha256sum -c SHA256SUMS
+          sha256sum -c HMCL-Region-Fix.jar.sha256
+          sha256sum -c "HMCL-Region-Fix-v$VERSION.zip.sha256"
+
+          for asset in "HMCL-Region-Fix.jar" "HMCL-Region-Fix-v$VERSION.zip"; do
+            test -f "$asset" || { echo "::error::missing asset $asset"; exit 1; }
+            gh attestation verify "$asset" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --deny-self-hosted-runners
+          done
+
+      - name: Create or update draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          cat > "$NOTES" <<'EOF'
+          ## 下载验证 / Verifying downloads
+
+          本版本由 GitHub Actions 从标签提交构建，发布前已校验 jar 内容与源码一致，并生成 Sigstore 构建来源证明。
+
+          ```bash
+          sha256sum -c SHA256SUMS
+          gh attestation verify HMCL-Region-Fix.jar --repo colorcard/hmcl-region-fix
+          gh attestation verify HMCL-Region-Fix-v<version>.zip --repo colorcard/hmcl-region-fix
+          ```
+
+          详见 [docs/RELEASING.md](https://github.com/colorcard/hmcl-region-fix/blob/main/docs/RELEASING.md)。
+          EOF
+
+          if gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+              -f tag_name="$TAG" --jq .body > "$RUNNER_TEMP/generated-notes.md" 2>/dev/null; then
+            printf '\n' >> "$NOTES"
+            cat "$RUNNER_TEMP/generated-notes.md" >> "$NOTES"
+          fi
+
+          case "$VERSION" in
+            *-*) PRERELEASE=true ;;
+            *) PRERELEASE=false ;;
+          esac
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            is_draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::Release $TAG is already published; refusing to overwrite it"
+              exit 1
+            fi
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$NOTES"
+          elif [ "$PRERELEASE" = true ]; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --verify-tag \
+              --prerelease \
+              --title "$TAG" \
+              --notes-file "$NOTES"
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --verify-tag \
+              --title "$TAG" \
+              --notes-file "$NOTES"
+          fi
+
+      - name: Upload assets and publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Drop unexpected assets left in a draft by an earlier run.
+          expected=" HMCL-Region-Fix.jar HMCL-Region-Fix-v$VERSION.zip HMCL-Region-Fix.jar.sha256 HMCL-Region-Fix-v$VERSION.zip.sha256 SHA256SUMS "
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | while IFS= read -r name; do
+            case "$expected" in
+              *" $name "*) ;;
+              *) gh release delete-asset "$TAG" "$name" --repo "$GITHUB_REPOSITORY" --yes ;;
+            esac
+          done
+
+          gh release upload "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            "dist/HMCL-Region-Fix.jar" \
+            "dist/HMCL-Region-Fix-v$VERSION.zip" \
+            "dist/HMCL-Region-Fix.jar.sha256" \
+            "dist/HMCL-Region-Fix-v$VERSION.zip.sha256" \
+            "dist/SHA256SUMS" \
+            --clobber
+
+          actual=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)
+          wanted=$(printf '%s\n' \
+            HMCL-Region-Fix.jar \
+            "HMCL-Region-Fix-v$VERSION.zip" \
+            HMCL-Region-Fix.jar.sha256 \
+            "HMCL-Region-Fix-v$VERSION.zip.sha256" \
+            SHA256SUMS | sort)
+          if [ "$actual" != "$wanted" ]; then
+            echo "::error::Unexpected assets in draft release $TAG"
+            printf 'Actual:\n%s\nExpected:\n%s\n' "$actual" "$wanted"
+            exit 1
+          fi
+
+          if [ "$VERSION" != "${VERSION%%-*}" ]; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease
+          else
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          fi
+
+      - name: Verify assets after publishing
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/published"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/published"
+          cd "$RUNNER_TEMP/published"
+
+          sha256sum -c SHA256SUMS
+          for asset in "HMCL-Region-Fix.jar" "HMCL-Region-Fix-v$VERSION.zip"; do
+            gh attestation verify "$asset" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --deny-self-hosted-runners
+          done

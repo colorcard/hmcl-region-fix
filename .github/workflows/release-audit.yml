@@ -1,0 +1,76 @@
+name: Audit release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to audit (for example v1.0.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  attestations: read
+
+concurrency:
+  group: audit-release-${{ github.event.release.tag_name || github.event.inputs.tag }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Verify release assets
+    if: github.repository == 'colorcard/hmcl-region-fix'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets
+
+      - name: Verify checksums and provenance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          cd assets
+
+          test -f SHA256SUMS || { echo "::error::release $TAG has no SHA256SUMS"; exit 1; }
+          sha256sum -c SHA256SUMS
+
+          test -f "HMCL-Region-Fix-v${TAG#v}.zip" \
+            || { echo "::error::release $TAG does not contain the matching zip"; exit 1; }
+
+          while IFS= read -r asset; do
+            test -f "$asset.sha256" || { echo "::error::missing $asset.sha256"; exit 1; }
+            sha256sum -c "$asset.sha256"
+          done < <(awk '{print $2}' SHA256SUMS)
+
+          expected=$( { awk '{print $2; print $2 ".sha256"}' SHA256SUMS; echo SHA256SUMS; } | sort )
+          actual=$(find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Release $TAG contains unexpected assets"
+            printf 'Actual:\n%s\nExpected:\n%s\n' "$actual" "$expected"
+            exit 1
+          fi
+
+          jar_count=$(find . -maxdepth 1 -name '*.jar' | wc -l)
+          zip_count=$(find . -maxdepth 1 -name '*.zip' | wc -l)
+          [ "$jar_count" -eq 1 ] || { echo "::error::expected exactly one jar"; exit 1; }
+          [ "$zip_count" -eq 1 ] || { echo "::error::expected exactly one zip"; exit 1; }
+
+          for asset in ./*.jar ./*.zip; do
+            gh attestation verify "$asset" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --deny-self-hosted-runners
+          done

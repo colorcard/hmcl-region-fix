@@ -1,0 +1,7 @@
+# Release-critical files require review from the maintainer.
+/.github/ @colorcard
+/build.sh @colorcard
+/build.bat @colorcard
+/scripts/ @colorcard
+/tests/ @colorcard
+/docs/RELEASING.md @colorcard

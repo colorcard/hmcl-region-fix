@@ -61,7 +61,7 @@ public final class RegionFixGui {
     private static final Pattern VERSION_PATTERN =
             Pattern.compile("(?i)HMCL[-_ ]?([0-9]+(?:\\.[0-9A-Za-z]+)+)");
 
-    private final JFrame frame = new JFrame(TITLE);
+    private JFrame frame;
     private final JLabel titleLabel = new JLabel(TITLE);
     private final JLabel subtitleLabel = new JLabel("适用于台湾、香港、澳门及亚太地区被误判为中国大陆的用户");
     private final JLabel statusLabel = new JLabel();
@@ -137,6 +137,8 @@ public final class RegionFixGui {
     // -------------------------------------------------------------- UI
 
     private void createAndShow() {
+        frame = new JFrame(TITLE);
+
         if (!prefGetBoolean("regionConfirmed")) {
             int r = JOptionPane.showConfirmDialog(null,
                     "本工具仅用于修复 HMCL 对台湾、香港、澳门及亚太地区用户的地区误判。\n"
