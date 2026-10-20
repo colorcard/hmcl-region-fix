@@ -25,7 +25,7 @@ import java.lang.reflect.Field;
 import java.security.ProtectionDomain;
 
 /**
- * HMCL Region Fix Agent（仅支持 HMCL 3.17+）
+ * HMCL Region Fix Agent（适用于使用 RegionUtils 地区判断的受限制 HMCL 版本）
  *
  * 新版 HMCL 使用 RegionUtils.isIsChinaMainlandNetwork() 判断是否禁用
  * 中国大陆的下载功能。本 Agent 在内存中把 RegionUtils 的

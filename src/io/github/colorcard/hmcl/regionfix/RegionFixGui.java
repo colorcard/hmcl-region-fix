@@ -762,8 +762,8 @@ public final class RegionFixGui {
 
         if (!containsRegionUtils(candidate.path)) {
             int r = JOptionPane.showConfirmDialog(frame,
-                    "这个文件里没有找到 HMCL 3.17+ 的下载限制代码。\n"
-                            + "可能不是 HMCL，或者是旧版本（本工具只支持 3.17+）。\n\n仍要尝试启动吗？",
+                    "这个文件里没有找到 HMCL 的地区限制代码（RegionUtils）。\n"
+                            + "可能不是 HMCL，或者是仍使用旧判断逻辑的版本。\n\n仍要尝试启动吗？",
                     "确认文件", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
             if (r != JOptionPane.YES_OPTION) {
                 return;
